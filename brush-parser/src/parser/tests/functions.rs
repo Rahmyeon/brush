@@ -97,3 +97,14 @@ fn parse_function_with_local_vars() -> Result<()> {
     });
     Ok(())
 }
+
+#[test]
+fn parse_function_with_crlf() -> Result<()> {
+    let input = "function hello() {\r\n  echo \"Hello\"\r\n}";
+    let result = test_with_snapshot(input)?;
+    assert_snapshot_redacted!(ParseResult {
+        input,
+        result: &result
+    });
+    Ok(())
+}

@@ -846,16 +846,32 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     // Consume the backslash ourselves so we can peek past it.
                     self.consume_char()?;
 
-                    if matches!(self.peek_char()?, Some('\n')) {
-                        // Make sure the newline char gets consumed too.
-                        self.consume_char()?;
-
-                        // Make sure to include neither the backslash nor the newline character.
-                    } else {
-                        state.in_escape = true;
-                        state.append_char(c);
+                    match self.peek_char()? {
+                        Some('\n') => {
+                            // Make sure the newline char gets consumed too.
+                            self.consume_char()?;
+                            // Make sure to include neither the backslash nor the newline character.
+                        }
+                        Some('\r') => {
+                            // Consume the carriage return ourselves so we can peek past it.
+                            self.consume_char()?;
+                            if matches!(self.peek_char()?, Some('\n')) {
+                                // Make sure the newline char gets consumed too.
+                                self.consume_char()?;
+                                // Make sure to include neither the backslash nor the CRLF sequence.
+                            } else {
+                                // Not a line continuation; treat as escaped carriage return.
+                                state.append_char('\\');
+                                state.append_char('\r');
+                            }
+                        }
+                        _ => {
+                            state.in_escape = true;
+                            state.append_char(c);
+                        }
                     }
-                } else if c == '\'' {
+                }
+ else if c == '\'' {
                     if state.token_so_far.ends_with('$') {
                         state.quote_mode = QuoteMode::AnsiC(self.cross_state.cursor.clone());
                     } else {
@@ -1208,12 +1224,25 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             tag_str.as_ref()
         };
 
-        if let Some(current_token_without_here_tag) = state.current_token().strip_suffix(tag_str) {
+        let current_token = state.current_token();
+        let mut found_tag = current_token.strip_suffix(tag_str);
+
+        // If we didn't find the tag and we're looking for a newline-terminated tag,
+        // try looking for a CRLF-terminated tag too.
+        if found_tag.is_none() && ends_with_newline && tag_str.ends_with('\n') {
+            if let Some(tag_without_newline) = tag_str.strip_suffix('\n') {
+                let crlf_tag = std::format!("{tag_without_newline}\r\n");
+                found_tag = current_token.strip_suffix(crlf_tag.as_str());
+            }
+        }
+
+        if let Some(current_token_without_here_tag) = found_tag {
             // Make sure that was either the start of the here document, or there
             // was a newline between the preceding part
             // and the tag.
             if current_token_without_here_tag.is_empty()
                 || current_token_without_here_tag.ends_with('\n')
+                || current_token_without_here_tag.ends_with("\r\n")
             {
                 state.replace_with_here_doc(current_token_without_here_tag.to_owned());
 
@@ -1282,7 +1311,7 @@ impl<R: ?Sized + std::io::BufRead> Iterator for Tokenizer<'_, R> {
 }
 
 const fn is_blank(c: char) -> bool {
-    c == ' ' || c == '\t'
+    c == ' ' || c == '\t' || c == '\r'
 }
 
 const fn does_char_newly_affect_quoting(state: &TokenParseState, c: char) -> bool {
@@ -1372,6 +1401,12 @@ mod tests {
             r"a\
 bc"
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn tokenize_line_continuation_crlf() -> Result<()> {
+        assert_ron_snapshot!(test_tokenizer("a\\\r\nbc")?);
         Ok(())
     }
 
